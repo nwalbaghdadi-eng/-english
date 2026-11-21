@@ -38,7 +38,10 @@ import tempfile
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
+import io
+
 import edge_tts
+import httpx
 from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import (
@@ -351,6 +354,117 @@ TUTOR = None  # created in main()
 
 
 # ---------------------------------------------------------------------------
+# Picture requests: free illustrative images from Wikimedia Commons
+# (no API key, no cost). The bot turns "send me a picture of a kitchen"
+# into a photo with a simple-English caption and new vocab words.
+# ---------------------------------------------------------------------------
+
+# Wikimedia requires a descriptive User-Agent or it answers 403.
+COMMONS_HEADERS = {
+    "User-Agent": (
+        "EnglizyBot/1.0 (https://english-bot-b5rs.onrender.com; "
+        "contact: 09m4r5@mail.instinct.com) httpx"
+    )
+}
+
+# Detects "picture/photo/image of ..." in English or Arabic (صورة / وريني).
+PIC_HINT = re.compile(
+    r"(picture|photo|image|pic)\b|صورة|صوره|وريني|واريني", re.IGNORECASE
+)
+
+PIC_PLAN_PROMPT = """An Egyptian Arabic speaker learning English sent this message:
+"{msg}"
+
+He is asking for a picture of something. Reply in EXACTLY this 3-line format:
+SEARCH: <the thing he wants, as 1-3 simple English words for an image search, or NONE if you cannot tell>
+ARABIC: <the Egyptian Arabic meaning of that thing>
+WORDS: <2 related English words, each with its Egyptian Arabic meaning, comma separated>"""
+
+
+async def find_commons_image(query: str) -> str | None:
+    """Search Wikimedia Commons for a free photo, return a thumbnail URL."""
+    params = {
+        "action": "query",
+        "format": "json",
+        "generator": "search",
+        "gsrsearch": f"{query} filetype:bitmap",
+        "gsrnamespace": "6",
+        "gsrlimit": "8",
+        "prop": "imageinfo",
+        "iiprop": "url|size|mime",
+        "iiurlwidth": "800",
+    }
+    async with httpx.AsyncClient(timeout=15, headers=COMMONS_HEADERS) as client:
+        resp = await client.get("https://commons.wikimedia.org/w/api.php", params=params)
+        resp.raise_for_status()
+        data = resp.json()
+    pages = (data.get("query") or {}).get("pages") or {}
+    for page in pages.values():
+        info = (page.get("imageinfo") or [{}])[0]
+        if (
+            info.get("mime") in ("image/jpeg", "image/png")
+            and info.get("thumburl")
+            and (info.get("width") or 0) >= 300
+        ):
+            return info["thumburl"]
+    return None
+
+
+async def picture_flow(update: Update, text: str) -> None:
+    """Handle a request for an illustrative picture."""
+    await update.message.chat.send_action("upload_photo")
+    try:
+        raw = TUTOR.generate_one(PIC_PLAN_PROMPT.format(msg=text))
+    except Exception:
+        logger.exception("picture plan failed")
+        await update.message.reply_text("حصلت مشكلة وأنا بجهز الصورة 😅 جرب تاني بعد شوية.")
+        return
+
+    plan = {}
+    for line in raw.splitlines():
+        if ":" in line:
+            key, _, val = line.partition(":")
+            plan[key.strip().upper()] = val.strip()
+    search = plan.get("SEARCH", "")
+    if not search or search.upper() == "NONE":
+        await update.message.reply_text("صورة إيه بالظبط؟ 🙂 قولي الحاجة بالإنجليزي أو بالعربي.")
+        return
+
+    try:
+        url = await find_commons_image(search)
+    except Exception:
+        logger.exception("commons search failed")
+        url = None
+    if not url:
+        await update.message.reply_text(
+            f"مش لاقي صورة كويسة لـ \"{search}\" دلوقتي 😅 جرب كلمة أبسط أو حاجة تانية."
+        )
+        return
+
+    # Download the photo ourselves (Wikimedia blocks unknown user agents)
+    # and upload it to Telegram instead of passing the raw URL.
+    try:
+        async with httpx.AsyncClient(timeout=20, headers=COMMONS_HEADERS) as client:
+            img = await client.get(url)
+            img.raise_for_status()
+    except Exception:
+        logger.exception("image download failed")
+        await update.message.reply_text("الصورة وصلت متأخرة 😅 جرب تاني بعد شوية.")
+        return
+
+    caption = f"📷 {search}"
+    if plan.get("ARABIC"):
+        caption += f" = {plan['ARABIC']}"
+    if plan.get("WORDS"):
+        caption += f"\n{plan['WORDS']}"
+    caption += "\nWhat do you see? 👀"
+    ext = "png" if "png" in (img.headers.get("content-type") or "") else "jpg"
+    photo = io.BytesIO(img.content)
+    photo.name = f"englizy.{ext}"
+    await update.message.reply_photo(photo=photo, caption=caption[:1000])
+
+
+# ---------------------------------------------------------------------------
 # Voice replies: free text-to-speech via edge-tts (no API key needed).
 # Speaks only the English part so the learner hears correct pronunciation.
 # ---------------------------------------------------------------------------
@@ -431,9 +545,11 @@ HELP = """إزاي تستخدمني 🤓
 1. كتابة: اتكلم معايا بإنجليزي عادي، هصححلك الأخطاء وأعلمك الصح.
 2. صوت: ابعت فويس نوت بإنجليزي، هقولك سمعتك بتقول إيه، وأصححلك النطق بالمصري، وهرد عليك بفويس عشان تسمع النطق الصح.
 3. صور وفيديو: ابعت صورة أو فيديو قصير مسجل وأنا أوصفهولك بإنجليزي بسيط وأعلمك كلمات منه. (ملحوظة: الكاميرا اللايف مش ممكنة في تيليجرام، لازم تبعت صورة أو فيديو مسجل.)
-4. /quiz يسألك سؤال اختياري في كلمات إنجليزي.
-5. /level مستواك: beginner (من الصفر) - easy - medium.
-6. /cancel يلغي الاختبار الحالي - /start يمسح المحادثة ونبدأ من الأول.
+4. اطلب صورة أي حاجة وأنا أبعتهالك مع كلمات جديدة: "send me a picture of a kitchen" أو "ابعت صورة مطبخ".
+5. ركّز على موضوع: قولي "عاوز أتمرن على أسئلة الإنترفيو" وأنا أفضل معاك فيه لحد ما تغيّره.
+6. /quiz يسألك سؤال اختياري في كلمات إنجليزي.
+7. /level مستواك: beginner (من الصفر) - easy - medium.
+8. /cancel يلغي الاختبار الحالي - /start يمسح المحادثة ونبدأ من الأول.
 
 نصيحة: كل ما تتكلم أكتر، تتعلم أسرع. متخافش من الغلط! 💪"""
 
@@ -508,6 +624,11 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 "متزعلش، الغلط هو اللي بيعلمنا. جرب /quiz تاني!",
                 parse_mode="Markdown",
             )
+        return
+
+    # A picture request gets a real photo + vocab, not just chat.
+    if PIC_HINT.search(text):
+        await picture_flow(update, text)
         return
 
     await update.message.chat.send_action("typing")
