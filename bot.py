@@ -22,7 +22,7 @@ Configuration (environment variables, or a .env file next to this file):
   TELEGRAM_BOT_TOKEN  (required) token from @BotFather
   LLM_PROVIDER        "gemini" (default) or "openai" (text chat only)
   GEMINI_API_KEY      required when LLM_PROVIDER=gemini
-  GEMINI_MODEL        default: gemini-3.8-flash (free tier, multimodal)
+  GEMINI_MODEL        default: gemini-3.5-flash-lite (free tier, multimodal)
   OPENAI_API_KEY      required when LLM_PROVIDER=openai
   OPENAI_BASE_URL     optional; set it for OpenAI-compatible providers
   OPENAI_MODEL        default: gpt-4o-mini
@@ -38,6 +38,7 @@ import tempfile
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
+import asyncio
 import io
 
 import edge_tts
@@ -345,12 +346,24 @@ def build_tutor():
     if provider == "gemini":
         return GeminiTutor(
             api_key=os.environ["GEMINI_API_KEY"],
-            model_name=os.getenv("GEMINI_MODEL", "gemini-3.8-flash"),
+            # Default: 3.5-flash-lite. gemini-3.8-flash hung 4+ minutes on
+            # its first real call on the free tier (2026-11-21 incident).
+            model_name=os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite"),
         )
     raise ValueError(f"Unknown LLM_PROVIDER: {provider!r} (use 'gemini' or 'openai')")
 
 
 TUTOR = None  # created in main()
+
+
+async def ask_tutor(fn, *args, timeout: int = 90):
+    """Run a blocking tutor call in a thread with a hard timeout.
+
+    The Gemini SDK calls are synchronous; awaited directly they would freeze
+    the whole bot (polling included) whenever a call hangs. This wrapper
+    keeps the event loop alive and raises TimeoutError instead of hanging.
+    """
+    return await asyncio.wait_for(asyncio.to_thread(fn, *args), timeout=timeout)
 
 
 # ---------------------------------------------------------------------------
@@ -414,7 +427,7 @@ async def picture_flow(update: Update, text: str) -> None:
     """Handle a request for an illustrative picture."""
     await update.message.chat.send_action("upload_photo")
     try:
-        raw = TUTOR.generate_one(PIC_PLAN_PROMPT.format(msg=text))
+        raw = await ask_tutor(TUTOR.generate_one, PIC_PLAN_PROMPT.format(msg=text))
     except Exception:
         logger.exception("picture plan failed")
         await update.message.reply_text("حصلت مشكلة وأنا بجهز الصورة 😅 جرب تاني بعد شوية.")
@@ -586,7 +599,7 @@ async def level_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def quiz(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.chat.send_action("typing")
     try:
-        result = make_quiz()
+        result = await ask_tutor(make_quiz)
     except Exception:
         logger.exception("quiz generation failed")
         await update.message.reply_text("حصلت مشكلة وأنا بجهز السؤال 😅 جرب تاني بعد شوية.")
@@ -633,7 +646,7 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     await update.message.chat.send_action("typing")
     try:
-        answer = TUTOR.reply(update.effective_user.id, text)
+        answer = await ask_tutor(TUTOR.reply, update.effective_user.id, text)
     except Exception:
         logger.exception("tutor reply failed")
         await update.message.reply_text("حصلت مشكلة وأنا بفكر في الرد 😅 جرب تاني بعد دقيقة.")
@@ -653,7 +666,9 @@ async def voice_msg(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     try:
-        raw = TUTOR.analyze_audio(update.effective_user.id, data, "audio/ogg")
+        raw = await ask_tutor(
+            TUTOR.analyze_audio, update.effective_user.id, data, "audio/ogg", timeout=120
+        )
     except NotImplementedError:
         await update.message.reply_text(
             "الفويسات شغالة مع مزود Gemini بس. الكتابة شغالة عادي."
@@ -692,7 +707,9 @@ async def photo_msg(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     caption = (update.message.caption or "").strip()
     try:
-        raw = TUTOR.analyze_image(update.effective_user.id, data, "image/jpeg", caption)
+        raw = await ask_tutor(
+            TUTOR.analyze_image, update.effective_user.id, data, "image/jpeg", caption, timeout=120
+        )
     except NotImplementedError:
         await update.message.reply_text("الصور شغالة مع مزود Gemini بس. الكتابة شغالة عادي.")
         return
@@ -726,7 +743,9 @@ async def video_msg(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     try:
-        raw = TUTOR.analyze_video(update.effective_user.id, data, "video/mp4")
+        raw = await ask_tutor(
+            TUTOR.analyze_video, update.effective_user.id, data, "video/mp4", timeout=150
+        )
     except NotImplementedError:
         await update.message.reply_text("الفيديو شغال مع مزود Gemini بس. الكتابة شغالة عادي.")
         return
