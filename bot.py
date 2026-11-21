@@ -102,6 +102,10 @@ Teaching rules:
 - Gently correct mistakes: show the original, the correction, one short reason.
 - When the learner writes in Arabic or asks what a word means, explain in
   Egyptian Arabic.
+- Voice: the learner can send you voice notes, and you CAN send voice notes
+  back. If they ask you to say something out loud or send a voice, just
+  answer normally - your reply is automatically also spoken as a voice
+  note. Never say you cannot send voice.
 - Keep every reply under 100 words. Warm and encouraging, never harsh.
 
 Conversation rules (follow these strictly):
@@ -385,6 +389,14 @@ PIC_HINT = re.compile(
     r"(picture|photo|image|pic)\b|صورة|صوره|وريني|واريني", re.IGNORECASE
 )
 
+# Detects "send me a voice / say it out loud" in English or Arabic.
+VOICE_REQ = re.compile(
+    r"فويس|صوت|بصوت|اسمع|سمعني|اسمعني|voice|speak|pronounce|say it",
+    re.IGNORECASE,
+)
+
+ARABIC_CHARS = re.compile(r"[\u0600-\u06FF\u0750-\u077F\uFB50-\uFDFF\uFE70-\uFEFF]+")
+
 PIC_PLAN_PROMPT = """An Egyptian Arabic speaker learning English sent this message:
 "{msg}"
 
@@ -652,6 +664,13 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text("حصلت مشكلة وأنا بفكر في الرد 😅 جرب تاني بعد دقيقة.")
         return
     await update.message.reply_text(answer)
+
+    # Asked for a voice note? Speak the English part of the reply too.
+    if VOICE_REQ.search(text):
+        english_only = ARABIC_CHARS.sub(" ", answer)
+        english_only = re.sub(r"\s+", " ", english_only).strip(" -*•.,!؟?")
+        if len(english_only) > 2:
+            await send_voice_reply(update, english_only)
 
 
 async def voice_msg(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
