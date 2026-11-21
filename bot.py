@@ -22,7 +22,7 @@ Configuration (environment variables, or a .env file next to this file):
   TELEGRAM_BOT_TOKEN  (required) token from @BotFather
   LLM_PROVIDER        "gemini" (default) or "openai" (text chat only)
   GEMINI_API_KEY      required when LLM_PROVIDER=gemini
-  GEMINI_MODEL        default: gemini-3.5-flash-lite (free tier, multimodal)
+  GEMINI_MODEL        default: gemini-3.8-flash (free tier, multimodal)
   OPENAI_API_KEY      required when LLM_PROVIDER=openai
   OPENAI_BASE_URL     optional; set it for OpenAI-compatible providers
   OPENAI_MODEL        default: gpt-4o-mini
@@ -93,13 +93,28 @@ def system_prompt(level: str) -> str:
 Learner level: {level}.
 {LEVEL_STYLE[level]}
 
-Rules:
+Teaching rules:
 - Chat naturally in simple English matched to the level.
 - Gently correct mistakes: show the original, the correction, one short reason.
 - When the learner writes in Arabic or asks what a word means, explain in
   Egyptian Arabic.
 - Keep every reply under 100 words. Warm and encouraging, never harsh.
-- End each reply with one small follow-up question to keep the chat going.
+
+Conversation rules (follow these strictly):
+- READ THE CONVERSATION HISTORY before every reply. Never ask a question you
+  already asked earlier in this conversation, not even reworded.
+- NEVER use filler questions like "How are you?" or "How are you today?" -
+  not as an opener, not as a fallback, not ever. After a greeting, move
+  straight into the lesson with something concrete.
+- Every reply must advance the conversation: react to what the learner
+  actually said in their last message, then ask ONE specific follow-up about
+  THEIR topic (their answer, their life, their opinion).
+- Vary your follow-ups: opinions, descriptions, daily life, tiny role-plays
+  (ordering food, meeting a friend, at the doctor). Never ask the same kind
+  of question twice in a row.
+- If the learner answers briefly, build on it: correct it, say it back in
+  better English, then dig one level deeper into the same topic.
+- If the learner asks a question, answer it first, then continue the thread.
 """
 
 
@@ -112,7 +127,9 @@ Do this:
 2. Check the pronunciation gently: if a word was unclear or mispronounced,
    explain in Egyptian Arabic how to say it correctly (write the word, then
    how it sounds using Arabic letters). If everything was clear, praise them.
-3. Continue the conversation with one short, very simple question.
+3. Continue the conversation with ONE specific follow-up question about the
+   topic the learner just spoke about. Never ask something you already asked
+   in this conversation, and never fall back to "how are you" style filler.
 
 Reply in EXACTLY this format, nothing else:
 TRANSCRIPT: <what you heard>
@@ -306,7 +323,7 @@ def build_tutor():
     if provider == "gemini":
         return GeminiTutor(
             api_key=os.environ["GEMINI_API_KEY"],
-            model_name=os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite"),
+            model_name=os.getenv("GEMINI_MODEL", "gemini-3.8-flash"),
         )
     raise ValueError(f"Unknown LLM_PROVIDER: {provider!r} (use 'gemini' or 'openai')")
 
